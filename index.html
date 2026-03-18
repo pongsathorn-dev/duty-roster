@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบจัดการเวรรับโทรศัพท์รายวัน</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <!-- Firebase Libraries -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, doc, setDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // สถานะเริ่มต้นของแอปพลิเคชัน
+        window.appState = {
+            viewDate: new Date(),
+            staffNames: [],
+            fixedDuties: {},
+            roster: {},
+            swapHistory: [], 
+            manualEdits: [], 
+            holidays: {}, 
+            isSidebarOpen: false, 
+            user: null,
+            isOnline: false,
+            isAdmin: false,
+            swapMode: { active: false, sourceDate: null } // โหมดสลับเวร
+        };
+
+        // Firebase config initialization with fallback
+        let firebaseConfig = null;
+        let app = null;
+        let db = null;
+        let auth = null;
+        let firebaseEnabled = false;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'duty-roster-v3';
+
+        // Try to initialize Firebase
+        try {
+            if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+                firebaseConfig = typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                firebaseEnabled = true;
+                console.log("✅ Firebase initialized successfully");
+            } else {
+                console.warn("⚠️ Firebase config not found, using localStorage");
+            }
+        } catch (error) {
+            console.error("❌ Firebase initialization error:", error);
+            console.log("📦 Switching to localStorage mode");
+        }
+
+        window.updateStatusUI = function() {
+            const statusEl = document.getElementById('connection-status');
+            if (statusEl) {
+                const roleText = window.appState.isAdmin ? '(Admin)' : '(Viewer)';
+                const modeText = firebaseEnabled ? 'Online' : 'Local';
+                const statusColor = firebaseEnabled && window.appState.isOnline ? 'bg-green-500' : firebaseEnabled ? 'bg-orange-500' : 'bg-blue-500';
+                const pulseClass = firebaseEnabled && !window.appState.isOnline ? 'animate-pulse' : '';
+                statusEl.innerHTML = `<span class="flex items-center gap-1"><span class="w-2 h-2 ${statusColor} rounded-full ${pulseClass}"></span> ${modeText} ${roleText}</span>`;
+            }
+        };
+
+        async function initApp() {
+            window.appState.holidays = window.getThaiHolidays(window.appState.viewDate.getFullYear());
+            
+            // Try Firebase auth if enabled
+            if (firebaseEnabled) {
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (error) {
+                    console.error("ข้อผิดพลาดการตรวจสอบสิทธิ:", error);
+                    firebaseEnabled = false;
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    window.appState.user = user;
+                    if (user) {
+                        subscribeToData();
+                        if (typeof window.refreshUI === 'function') window.refreshUI();
+                    }
+                });
+            } else {
+                // Use localStorage mode
+                console.log("📦 Loading from localStorage...");
+                window.appState.user = { uid: 'local-user' };
+                initializeFromStorage();
+                if (typeof window.refreshUI === 'function') window.refreshUI();
+            }
+        }
+
+        // Initialize app state from localStorage
+        function initializeFromStorage() {
+            const dataStr = localStorage.getItem(`duty-roster-${appId}`);
+            if (dataStr) {
+                try {
+                    const data = JSON.parse(dataStr);
+                    window.appState.staffNames = data.staffNames || [];
+                    window.appState.fixedDuties = data.fixedDuties || {};
+                    window.appState.roster = data.roster || {};
+                    window.appState.swapHistory = data.swapHistory || [];
+                    window.appState.manualEdits = data.manualEdits || [];
+                    console.log("✅ Data loaded from localStorage");
+                } catch (e) {
+                    console.error("❌ Error loading from localStorage:", e);
+                }
+            } else {
+                // Set default values
+                window.appState.staffNames = ["โบ", "พี่นา", "พี่จอย", "พี่เปิ้ล"];
+                window.appState.fixedDuties = { 1: "โบ", 2: "พี่นา", 3: "พี่จอย", 4: "พี่เปิ้ล", 5: "__AUTO_ROSTER__" };
+                saveToStorage();
+            }
+        }
+
+        // Save app state to localStorage
+        function saveToStorage() {
+            try {
+                const data = {
+                    staffNames: window.appState.staffNames,
+                    fixedDuties: window.appState.fixedDuties,
+                    roster: window.appState.roster,
+                    swapHistory: window.appState.swapHistory,
+                    manualEdits: window.appState.manualEdits,
+                    lastUpdated: new Date().toISOString()
+                };
+                localStorage.setItem(`duty-roster-${appId}`, JSON.stringify(data));
+                console.log("💾 Data saved to localStorage");
+            } catch (e) {
+                console.error("❌ Error saving to localStorage:", e);
+            }
+        }
+
+        function subscribeToData() {
+            if (!firebaseEnabled) {
+                console.log("⏭️ Firebase disabled, skipping subscribtion");
+                return;
+            }
+            
+            if (!window.appState.user) return;
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'global');
+            
+            onSnapshot(docRef, (docSnap) => {
+                window.appState.isOnline = true;
+                window.updateStatusUI();
+                
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    window.appState.staffNames = data.staffNames || [];
+                    window.appState.fixedDuties = data.fixedDuties || {};
+                    window.appState.roster = data.roster || {};
+                    window.appState.swapHistory = data.swapHistory || []; 
+                    window.appState.manualEdits = data.manualEdits || [];
+                    saveToStorage();
+                    console.log("☁️ Data synced from Firebase");
+                } else {
+                    window.appState.staffNames = ["โบ", "พี่นา", "พี่จอย", "พี่เปิ้ล"];
+                    window.appState.fixedDuties = { 1: "โบ", 2: "พี่นา", 3: "พี่จอย", 4: "พี่เปิ้ล", 5: "__AUTO_ROSTER__" };
+                    if (window.appState.isAdmin) window.saveToCloud();
+                }
+                if (typeof window.refreshUI === 'function') window.refreshUI();
+            }, (error) => {
+                window.appState.isOnline = false;
+                window.updateStatusUI();
+                console.warn("⚠️ Firebase error:", error);
+                initializeFromStorage();
+                if (typeof window.refreshUI === 'function') window.refreshUI();
+            });
+        }
+
+        window.saveToCloud = async function() {
+            // Always save to localStorage
+            saveToStorage();
+            
+            // Also save to Firebase if enabled and user is admin
+            if (!firebaseEnabled || !window.appState.user || !window.appState.isAdmin) return;
+            
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'global');
+            try {
+                await setDoc(docRef, {
+                    staffNames: window.appState.staffNames,
+                    fixedDuties: window.appState.fixedDuties,
+                    roster: window.appState.roster,
+                    swapHistory: window.appState.swapHistory,
+                    manualEdits: window.appState.manualEdits,
+                    lastUpdated: new Date()
+                });
+                console.log("☁️ Data saved to Firebase");
+            } catch (e) {
+                console.error("❌ Firebase save error:", e);
+            }
+        };
+
+        window.clearCalendarData = async function() {
+            if (!window.appState.user || !window.appState.isAdmin) return;
+            try {
+                window.appState.roster = {};
+                window.appState.swapHistory = [];
+                window.appState.manualEdits = [];
+                await window.saveToCloud();
+                window.refreshUI();
+                showToast("ล้างข้อมูลปฏิทินเรียบร้อย ✅");
+                return true;
+            } catch (e) {
+                console.error("ข้อผิดพลาดการล้างปฏิทิน", e);
+                return false;
+            }
+        };
+
+        window.initApp = initApp;
+    </script>
+
+    <style>
+        body { font-family: 'Kanit', sans-serif; background-color: #f8fafc; color: #334155; overflow-x: hidden; }
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; }
+        .day-card { transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1); border: 1px solid #e2e8f0; min-height: 140px; position: relative; border-radius: 1.25rem; overflow: hidden; background: white; }
+        .day-card:not(.disabled):hover { transform: translateY(-3px); box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1); border-color: #cbd5e1; }
+        .today-card { border: 2px solid #3b82f6 !important; background-color: #f0f7ff !important; box-shadow: 0 0 15px rgba(59, 130, 246, 0.2); }
+        .swap-source-card { border: 2px dashed #10b981 !important; background-color: #ecfdf5 !important; }
+        .swap-mode-active .day-card:not(.disabled):hover { border-color: #10b981; background-color: #f0fdf4; }
+        .today-tag { position: absolute; top: 0; right: 0; background: #3b82f6; color: white; font-size: 8px; padding: 2px 6px; border-bottom-left-radius: 8px; font-weight: bold; }
+        .badge { font-size: 10px; padding: 2px 8px; border-radius: 99px; margin-top: 4px; display: inline-block; font-weight: 600; line-height: 1.2; }
+        .badge-fixed { background: #f3e8ff; color: #7e22ce; border: 1px solid #e9d5ff; }
+        .badge-manual { background: #fff7ed; color: #c2410c; border: 1px solid #ffedd5; }
+        .badge-swapped { background: #ecfdf5; color: #059669; border: 1px solid #d1fae5; }
+        .badge-holiday { background: #fef2f2; color: #dc2626; border: 1px solid #fee2e2; }
+        .badge-moved { background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; }
+        .sidebar-transition { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        .sidebar-hidden { width: 0 !important; overflow: hidden; opacity: 0; pointer-events: none; margin-right: -2rem; }
+        .admin-only { display: none; }
+        body.is-admin .admin-only { display: block; }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        
+        @media (max-width: 768px) {
+            .calendar-grid { gap: 6px; }
+            .day-card { min-height: 100px; padding: 8px; }
+            .badge { font-size: 8px; padding: 1px 4px; }
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <!-- แถบแจ้งเตือนโหมดสลับเวร -->
+    <div id="swap-notice" class="fixed top-0 left-0 w-full bg-emerald-600 text-white p-4 shadow-xl z-[100] flex justify-between items-center transform -translate-y-full transition-transform duration-300">
+        <div class="flex items-center gap-3 ml-4">
+            <span class="text-xl">🔄</span>
+            <div>
+                <p class="font-bold text-sm">กำลังอยู่ในโหมดสลับเวร</p>
+                <p class="text-[10px] opacity-90">กรุณาคลิกเลือก "วันที่ต้องการสลับ" บนปฏิทิน</p>
+            </div>
+        </div>
+        <button onclick="cancelSwapMode()" class="mr-4 bg-white/20 hover:bg-white/30 px-4 py-2 rounded-xl text-xs font-bold transition">ยกเลิก</button>
+    </div>
+
+    <div class="max-w-7xl mx-auto">
+        <header class="mb-6 flex flex-col md:flex-row justify-between items-center bg-white p-6 rounded-[2rem] shadow-sm border border-gray-100 gap-4">
+            <div class="flex items-center gap-5 w-full md:w-auto">
+                <button onclick="toggleSidebar()" class="p-3 bg-gray-50 hover:bg-gray-100 rounded-2xl transition-colors ring-1 ring-slate-100">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                    </svg>
+                </button>
+                <div>
+                    <div class="flex items-center gap-3">
+                        <h1 class="text-2xl font-bold text-slate-800">☎️ ระบบจัดการเวรโทรศัพท์</h1>
+                        <div id="connection-status" class="text-[10px] font-bold uppercase tracking-widest bg-slate-100 px-2 py-1 rounded-md text-slate-500">
+                            Connecting...
+                        </div>
+                    </div>
+                    <p class="text-blue-600 font-semibold" id="current-month-display">...</p>
+                </div>
+            </div>
+            
+            <div class="flex items-center gap-3">
+                <div id="admin-login-area" class="flex items-center gap-2 bg-slate-50 p-2 rounded-2xl border border-slate-100">
+                    <input type="password" id="admin-pass" placeholder="รหัส" class="px-3 py-1.5 bg-white rounded-xl text-xs outline-none focus:ring-1 focus:ring-blue-300 w-20 md:w-28 transition-all">
+                </div>
+                <button id="auth-btn" onclick="toggleAdminRole()" class="bg-slate-800 text-white px-4 py-1.5 rounded-xl text-xs font-bold hover:bg-black transition">Login</button>
+                <div class="flex items-center gap-3 bg-slate-50 p-2 rounded-2xl border border-slate-100">
+                    <button onclick="changeMonth(-1)" class="w-10 h-10 flex items-center justify-center hover:bg-white hover:shadow-sm rounded-xl transition">⬅️</button>
+                    <input type="month" id="month-picker" onchange="jumpToMonth()" class="bg-transparent border-none font-semibold text-slate-700 outline-none px-2 w-32">
+                    <button onclick="changeMonth(1)" class="w-10 h-10 flex items-center justify-center hover:bg-white hover:shadow-sm rounded-xl transition">➡️</button>
+                </div>
+            </div>
+        </header>
+
+        <div class="flex flex-col lg:flex-row gap-8">
+            <aside id="sidebar-container" class="sidebar-transition sidebar-hidden w-full lg:w-80 shrink-0">
+                <div class="bg-white p-6 rounded-[2rem] shadow-sm border border-gray-100 sticky top-8">
+                    <div class="admin-only">
+                        <h2 class="text-lg font-bold mb-5 text-slate-800 flex items-center gap-2">
+                            <span class="p-2 bg-blue-50 rounded-lg text-sm">👥</span> รายชื่อเจ้าหน้าที่
+                        </h2>
+                        <div class="flex gap-2 mb-4">
+                            <input type="text" id="new-name" placeholder="เพิ่มชื่อ..." class="w-full px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-sm outline-none focus:ring-1 focus:ring-blue-200">
+                            <button onclick="addStaff()" class="bg-blue-600 text-white px-4 py-2 rounded-xl font-bold text-sm">เพิ่ม</button>
+                        </div>
+                        <ul id="staff-list" class="space-y-2 mb-6 max-h-40 overflow-y-auto pr-2 border-b pb-4"></ul>
+                        
+                        <h3 class="text-[10px] font-bold text-slate-400 mb-4 uppercase tracking-[0.2em]">ล็อคเวรประจำวัน (Fixed Duty)</h3>
+                        <div id="fixed-duty-settings" class="space-y-3 mb-6 bg-slate-50 p-4 rounded-2xl border border-slate-100"></div>
+
+                        <div class="space-y-2">
+                            <button onclick="autoAssignYear()" class="w-full bg-slate-800 text-white py-3 rounded-2xl text-[13px] font-bold hover:bg-slate-900 transition flex justify-center items-center gap-2 shadow-sm">
+                                ✨ จัดเวรทั้งปี (Auto)
+                            </button>
+                            <button onclick="confirmResetCalendar()" class="w-full border border-red-100 text-red-400 py-3 rounded-2xl text-[12px] font-bold hover:bg-red-50 transition">
+                                🗑️ ล้างปฏิทินเท่านั้น
+                            </button>
+                        </div>
+                    </div>
+                    <div id="viewer-msg" class="text-center p-6 bg-slate-50 rounded-[1.5rem] border border-dashed border-slate-200">
+                        <p class="text-[11px] text-slate-400">เข้าสู่ระบบเพื่อจัดการข้อมูล</p>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="flex-1 min-w-0 space-y-8">
+                <div id="calendar-container" class="bg-white p-5 md:p-8 rounded-[2.5rem] shadow-sm border border-gray-100">
+                    <div class="grid grid-cols-7 gap-3 mb-6 text-center">
+                        <div class="text-[10px] font-bold text-red-400 uppercase tracking-widest text-center">อา.</div>
+                        <div class="text-[10px] font-bold text-slate-400 uppercase tracking-widest text-center">จ.</div>
+                        <div class="text-[10px] font-bold text-slate-400 uppercase tracking-widest text-center">อ.</div>
+                        <div class="text-[10px] font-bold text-slate-400 uppercase tracking-widest text-center">พ.</div>
+                        <div class="text-[10px] font-bold text-slate-400 uppercase tracking-widest text-center">พฤ.</div>
+                        <div class="text-[10px] font-bold text-blue-500 uppercase tracking-widest text-center">ศ.</div>
+                        <div class="text-[10px] font-bold text-red-400 uppercase tracking-widest text-center">ส.</div>
+                    </div>
+                    <div id="calendar-body" class="calendar-grid"></div>
+                </div>
+
+                <div id="swap-history-section" class="bg-white p-8 rounded-[2.5rem] shadow-sm border border-gray-100 overflow-hidden">
+                    <h2 class="text-xl font-bold mb-6 text-slate-800 flex items-center gap-3">
+                        <span class="p-2 bg-emerald-50 rounded-xl">🔄</span> ประวัติการสลับเวร
+                    </h2>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm text-left">
+                            <thead>
+                                <tr class="text-slate-400 border-b border-slate-50 text-[11px] uppercase tracking-wider">
+                                    <th class="pb-4 font-semibold">วัน/เวลาที่ทำรายการ</th>
+                                    <th class="pb-4 font-semibold">คู่ที่สลับ</th>
+                                    <th class="pb-4 font-semibold">รายละเอียด</th>
+                                    <th class="pb-4 font-semibold text-right">การจัดการ</th>
+                                </tr>
+                            </thead>
+                            <tbody id="swap-history-list" class="divide-y divide-slate-50"></tbody>
+                        </table>
+                        <div id="no-swap-msg" class="text-center py-10 text-slate-300 italic text-sm">ยังไม่มีประวัติการสลับเวร</div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Modal แก้ไขข้อมูล -->
+    <div id="edit-modal" class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 hidden opacity-0 transition-opacity">
+        <div class="bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl p-8 transform scale-95 transition-transform">
+            <div class="flex justify-between items-start mb-6">
+                <div>
+                    <h3 id="modal-date-title" class="text-xl font-bold text-slate-800">วันที่...</h3>
+                    <p id="modal-date-subtitle" class="text-xs text-slate-400">เลือกเจ้าหน้าที่สำหรับวันที่นี้</p>
+                </div>
+                <button onclick="closeEditModal()" class="p-2 hover:bg-slate-50 rounded-full">✕</button>
+            </div>
+            
+            <div class="grid grid-cols-2 gap-3 mb-6">
+                <div class="col-span-2 text-[10px] font-bold text-slate-300 uppercase mb-1">เลือกเจ้าหน้าที่โดยตรง</div>
+                <div id="modal-staff-options" class="grid grid-cols-2 gap-2 col-span-2"></div>
+            </div>
+
+            <div class="border-t pt-6">
+                <div class="text-[10px] font-bold text-slate-300 uppercase mb-4">การจัดการเวรขั้นสูง</div>
+                <div class="bg-emerald-50 p-6 rounded-3xl border border-emerald-100 flex flex-col items-center text-center">
+                    <p class="text-[11px] text-emerald-700 font-bold mb-1">ต้องการสลับเวรกับวันอื่น?</p>
+                    <p class="text-[9px] text-emerald-600/70 mb-4">กดปุ่มด้านล่างแล้วคลิกเลือกวันที่บนปฏิทิน</p>
+                    <button onclick="startSwapSelection()" class="w-full bg-emerald-600 text-white py-3 rounded-2xl text-xs font-bold hover:bg-emerald-700 transition shadow-md shadow-emerald-100 flex items-center justify-center gap-2">
+                        <span>🔄 เริ่มการสลับเวร</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal ยืนยันการกระทำ -->
+    <div id="confirm-modal" class="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-slate-900/60 hidden opacity-0 transition-opacity">
+        <div class="bg-white p-8 rounded-[2rem] shadow-2xl max-w-sm w-full text-center">
+            <div class="w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl">⚠️</div>
+            <h3 class="text-lg font-bold mb-2">ยืนยันการดำเนินการ</h3>
+            <p id="confirm-msg" class="text-sm text-slate-500 mb-8 leading-relaxed"></p>
+            <div class="flex gap-3">
+                <button id="confirm-yes" class="flex-1 bg-slate-800 text-white py-3 rounded-2xl font-bold hover:bg-black transition">ยืนยัน</button>
+                <button onclick="closeConfirm()" class="flex-1 bg-slate-100 py-3 rounded-2xl font-bold hover:bg-slate-200 transition">ยกเลิก</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="fixed bottom-8 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-8 py-4 rounded-2xl shadow-2xl transform translate-y-40 transition-all z-[100] flex items-center gap-3">
+        <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+        <span id="toast-text" class="text-sm font-medium">...</span>
+    </div>
+
+    <script>
+        const dayNamesTh = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
+        let activeEditDate = null;
+
+        function getThaiHolidays(year) {
+            return {
+                [`${year}-01-01`]: "วันขึ้นปีใหม่",
+                [`${year}-04-06`]: "วันจักรี",
+                [`${year}-04-13`]: "วันสงกรานต์",
+                [`${year}-04-14`]: "วันสงกรานต์",
+                [`${year}-04-15`]: "วันสงกรานต์",
+                [`${year}-05-01`]: "วันแรงงาน",
+                [`${year}-05-04`]: "วันฉัตรมงคล",
+                [`${year}-06-03`]: "วันเฉลิมฯ พระราชินี",
+                [`${year}-07-28`]: "วันเฉลิมฯ ร.10",
+                [`${year}-08-12`]: "วันแม่แห่งชาติ",
+                [`${year}-10-13`]: "วันสวรรคต ร.9",
+                [`${year}-10-23`]: "วันปิยมหาราช",
+                [`${year}-12-05`]: "วันพ่อแห่งชาติ",
+                [`${year}-12-10`]: "วันรัฐธรรมนูญ",
+                [`${year}-12-31`]: "วันสิ้นปี",
+                "2024-02-24": "วันมาฆบูชา", "2024-05-22": "วันวิสาขบูชา", "2024-07-20": "วันอาสาฬหบูชา", "2024-07-21": "วันเข้าพรรษา",
+                "2025-02-12": "วันมาฆบูชา", "2025-05-11": "วันวิสาขบูชา", "2025-07-10": "วันอาสาฬหบูชา", "2025-07-11": "วันเข้าพรรษา",
+                "2026-03-03": "วันมาฆบูชา", "2026-05-31": "วันวิสาขบูชา", "2026-07-29": "วันอาสาฬหบูชา", "2026-07-30": "วันเข้าพรรษา"
+            };
+        }
+        window.getThaiHolidays = getThaiHolidays;
+
+        function toggleAdminRole() {
+            console.log("🔘 toggleAdminRole clicked - Current Admin Status:", window.appState.isAdmin);
+            
+            if (!window.appState.isAdmin) {
+                // LOGIN MODE
+                const pass = document.getElementById('admin-pass').value;
+                console.log("🔑 Attempting login with password:", pass ? "***" : "empty");
+                
+                if (pass === "1234") {
+                    window.appState.isAdmin = true;
+                    document.body.classList.add('is-admin');
+                    
+                    // Hide input password only
+                    const adminPass = document.getElementById('admin-pass');
+                    if (adminPass) {
+                        adminPass.style.display = 'none';
+                        console.log("🔐 Password input hidden");
+                    }
+                    
+                    document.getElementById('viewer-msg').classList.add('hidden');
+                    showToast("ยินดีต้อนรับ Admin ✅");
+                    console.log("✅ Admin logged in successfully");
+                } else {
+                    showToast("รหัสผ่านไม่ถูกต้อง! (รหัส: 1234)");
+                    console.log("❌ Wrong password");
+                }
+            } else {
+                // LOGOUT MODE
+                console.log("🚪 Logging out...");
+                window.appState.isAdmin = false;
+                document.body.classList.remove('is-admin');
+                
+                // Show password input again
+                const adminPass = document.getElementById('admin-pass');
+                if (adminPass) {
+                    adminPass.value = '';
+                    adminPass.style.display = 'block';
+                    console.log("🔓 Password input shown and cleared");
+                }
+                
+                document.getElementById('viewer-msg').classList.remove('hidden');
+                
+                showToast("ออกจากระบบเรียบร้อย 👋");
+                console.log("✅ Admin logged out successfully");
+            }
+            
+            updateAuthUI();
+            refreshUI();
+        }
+
+        function updateAuthUI() {
+            console.log("🔐 updateAuthUI called - Admin:", window.appState.isAdmin);
+            
+            const authBtn = document.getElementById('auth-btn');
+            const adminPass = document.getElementById('admin-pass');
+            
+            if (!authBtn) {
+                console.error("❌ auth-btn not found!");
+                return;
+            }
+            
+            if (window.appState.isAdmin) {
+                // ADMIN MODE - Show Logout
+                authBtn.textContent = 'Logout';
+                authBtn.className = 'bg-red-600 text-white px-4 py-1.5 rounded-xl text-xs font-bold hover:bg-red-700 transition';
+                console.log("🔴 Button changed to Logout (RED)");
+                
+                if (adminPass) {
+                    adminPass.style.display = 'none';
+                    console.log("🔐 Password input hidden");
+                }
+            } else {
+                // VIEWER MODE - Show Login
+                authBtn.textContent = 'Login';
+                authBtn.className = 'bg-slate-800 text-white px-4 py-1.5 rounded-xl text-xs font-bold hover:bg-black transition';
+                console.log("⚫ Button changed to Login (BLACK)");
+                
+                if (adminPass) {
+                    adminPass.style.display = 'block';
+                    console.log("🔓 Password input shown");
+                }
+            }
+        }
+
+        function toggleSidebar() {
+            window.appState.isSidebarOpen = !window.appState.isSidebarOpen;
+            document.getElementById('sidebar-container').classList.toggle('sidebar-hidden', !window.appState.isSidebarOpen);
+        }
+
+        function refreshUI() {
+            renderStaffList();
+            renderFixedDutySettings();
+            renderCalendar();
+            renderSwapHistory();
+            updateHeader();
+            updateAuthUI();
+        }
+
+        function updateHeader() {
+            const options = { month: 'long', year: 'numeric' };
+            document.getElementById('current-month-display').innerText = window.appState.viewDate.toLocaleDateString('th-TH', options);
+            document.getElementById('month-picker').value = `${window.appState.viewDate.getFullYear()}-${String(window.appState.viewDate.getMonth() + 1).padStart(2, '0')}`;
+        }
+
+        function renderStaffList() {
+            const list = document.getElementById('staff-list');
+            list.innerHTML = window.appState.staffNames.map((name, i) => `
+                <li class="flex justify-between items-center bg-slate-50 px-3 py-2 rounded-xl text-sm border border-slate-100">
+                    <span class="font-medium">${name}</span> 
+                    <button onclick="removeStaff(${i})" class="text-slate-300 hover:text-red-400 transition">✕</button>
+                </li>
+            `).join('');
+        }
+
+        function renderFixedDutySettings() {
+            const container = document.getElementById('fixed-duty-settings');
+            container.innerHTML = [1,2,3,4,5].map(day => {
+                let optionsHtml = window.appState.staffNames.map(n => 
+                    `<option value="${n}" ${window.appState.fixedDuties[day] === n ? 'selected' : ''}>${n}</option>`
+                ).join('');
+
+                if (day === 5) {
+                    optionsHtml = `<option value="__AUTO_ROSTER__" ${window.appState.fixedDuties[day] === "__AUTO_ROSTER__" ? 'selected' : ''}>🔄 วนอัตโนมัติ</option>` + optionsHtml;
+                }
+
+                return `
+                <div class="flex items-center justify-between text-[11px] gap-2">
+                    <span class="w-14 font-bold ${day === 5 ? 'text-blue-500' : 'text-slate-500'}">${dayNamesTh[day]}</span>
+                    <select onchange="setFixedDuty(${day}, this.value)" class="flex-1 bg-white border border-slate-100 rounded-lg p-1.5 outline-none focus:ring-1 focus:ring-blue-200">
+                        <option value="">- ว่าง -</option>
+                        ${optionsHtml}
+                    </select>
+                </div>
+                `;
+            }).join('');
+        }
+
+        function setFixedDuty(day, name) {
+            if (name) window.appState.fixedDuties[day] = name;
+            else delete window.appState.fixedDuties[day];
+            window.saveToCloud();
+        }
+
+        function addStaff() {
+            const input = document.getElementById('new-name');
+            const name = input.value.trim();
+            if (name && !window.appState.staffNames.includes(name)) {
+                window.appState.staffNames.push(name);
+                input.value = '';
+                window.saveToCloud();
+                refreshUI();
+            }
+        }
+
+        function removeStaff(i) {
+            window.appState.staffNames.splice(i, 1);
+            window.saveToCloud();
+            refreshUI();
+        }
+
+        function formatDateKey(date) {
+            return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+        }
+
+        async function syncFridayRotation() {
+            const year = window.appState.viewDate.getFullYear();
+            const staff = window.appState.staffNames;
+            const holidays = window.getThaiHolidays(year);
+            if (staff.length === 0 || window.appState.fixedDuties[5] !== "__AUTO_ROSTER__") return;
+
+            const startDate = new Date(year, 0, 1);
+            const endDate = new Date(year, 11, 31);
+            let fridayPtr = 0;
+            let weekHolidayPerson = null;
+
+            for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+                const dateKey = formatDateKey(d);
+                const dayIdx = d.getDay();
+                if (dayIdx >= 1 && dayIdx <= 4 && holidays[dateKey]) {
+                    const fixedPerson = window.appState.fixedDuties[dayIdx];
+                    if (fixedPerson && staff.includes(fixedPerson)) weekHolidayPerson = fixedPerson;
+                }
+                if (dayIdx === 5) {
+                    if (window.appState.manualEdits.includes(dateKey)) {
+                        const manualName = window.appState.roster[dateKey];
+                        if (staff.includes(manualName)) fridayPtr = (staff.indexOf(manualName) + 1) % staff.length;
+                        weekHolidayPerson = null;
+                        continue;
+                    }
+                    if (weekHolidayPerson) {
+                        window.appState.roster[dateKey] = weekHolidayPerson;
+                    } else {
+                        window.appState.roster[dateKey] = staff[fridayPtr];
+                        fridayPtr = (fridayPtr + 1) % staff.length;
+                    }
+                    weekHolidayPerson = null;
+                }
+            }
+        }
+
+        async function autoAssignYear() {
+            const year = window.appState.viewDate.getFullYear();
+            showConfirm(`จัดเวรปี ${year} ทั้งหมด?\n(เวรที่จัดแบบ Manual หรือสลับไว้จะยังคงอยู่)`, async () => {
+                const holidays = window.getThaiHolidays(year);
+                const staff = window.appState.staffNames;
+                if (staff.length === 0) return;
+                const startDate = new Date(year, 0, 1);
+                const endDate = new Date(year, 11, 31);
+                for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+                    const dateKey = formatDateKey(d);
+                    const dayIdx = d.getDay();
+                    if (window.appState.manualEdits.includes(dateKey)) continue;
+                    if (dayIdx >= 1 && dayIdx <= 4) {
+                        window.appState.roster[dateKey] = holidays[dateKey] ? "วันหยุด" : (window.appState.fixedDuties[dayIdx] || "เวรว่าง");
+                    } else if (dayIdx === 0 || dayIdx === 6 || holidays[dateKey]) {
+                        window.appState.roster[dateKey] = "วันหยุด";
+                    }
+                }
+                await syncFridayRotation();
+                await window.saveToCloud();
+                refreshUI();
+                showToast("จัดตารางเวรอัตโนมัติเรียบร้อย ✅");
+            });
+        }
+
+        function renderCalendar() {
+            const container = document.getElementById('calendar-body');
+            container.innerHTML = '';
+            const year = window.appState.viewDate.getFullYear();
+            const month = window.appState.viewDate.getMonth();
+            const holidays = window.getThaiHolidays(year);
+            const firstDay = new Date(year, month, 1).getDay();
+            const daysInMonth = new Date(year, month + 1, 0).getDate();
+            const todayKey = formatDateKey(new Date());
+
+            const calendarContainer = document.getElementById('calendar-container');
+            if (window.appState.swapMode.active) {
+                calendarContainer.classList.add('swap-mode-active');
+            } else {
+                calendarContainer.classList.remove('swap-mode-active');
+            }
+
+            for (let i = 0; i < firstDay; i++) {
+                const empty = document.createElement('div');
+                empty.className = "day-card opacity-20 border-dashed disabled";
+                container.appendChild(empty);
+            }
+
+            for (let d = 1; d <= daysInMonth; d++) {
+                const date = new Date(year, month, d);
+                const dateKey = formatDateKey(date);
+                const dayIdx = date.getDay();
+                const holiday = holidays[dateKey];
+                const person = window.appState.roster[dateKey] || "-";
+
+                const dayEl = document.createElement('div');
+                let cardClass = `day-card p-4 ${window.appState.isAdmin ? 'cursor-pointer' : ''} ${dateKey === todayKey ? 'today-card' : ''}`;
+                
+                if (window.appState.swapMode.active && dateKey === window.appState.swapMode.sourceDate) {
+                    cardClass += ' swap-source-card';
+                }
+
+                dayEl.className = cardClass;
+                if (window.appState.isAdmin) {
+                    dayEl.onclick = () => handleDayClick(dateKey);
+                }
+
+                let badge = '';
+                const swapInfo = window.appState.swapHistory.find(s => s.date1 === dateKey || s.date2 === dateKey);
+                
+                let isFridayMoved = false;
+                if (dayIdx === 5 && !window.appState.manualEdits.includes(dateKey) && person !== "วันหยุด" && person !== "เวรว่าง") {
+                    const weekStart = new Date(date);
+                    weekStart.setDate(date.getDate() - 4);
+                    for (let wd = new Date(weekStart); wd < date; wd.setDate(wd.getDate() + 1)) {
+                        const wk = formatDateKey(wd);
+                        if (holidays[wk] && window.appState.fixedDuties[wd.getDay()] === person) {
+                            isFridayMoved = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (holiday) {
+                    badge = `<span class="badge badge-holiday">🏝️ ${holiday}</span>`;
+                } else if (swapInfo) {
+                    // ปรับปรุงตรรกะการแสดงผลสลับแทนเจ้าของเวรเดิม
+                    let originalPersonOfThisDate, targetDateOfSwap;
+                    
+                    if (swapInfo.date1 === dateKey) {
+                        originalPersonOfThisDate = swapInfo.person1Orig;
+                        targetDateOfSwap = swapInfo.date2;
+                    } else {
+                        originalPersonOfThisDate = swapInfo.person2Orig;
+                        targetDateOfSwap = swapInfo.date1;
+                    }
+
+                    // จัดรูปแบบวันที่ดั้งเดิมให้สวยงาม (DD/MM/YY)
+                    const [y, m, dayPart] = targetDateOfSwap.split('-');
+                    const displayTargetDate = `${parseInt(dayPart)}/${parseInt(m)}/${y.substring(2)}`;
+                    
+                    badge = `<span class="badge badge-swapped">🔄 สลับแทน ${originalPersonOfThisDate} วันที่ ${displayTargetDate}</span>`;
+                } else if (window.appState.manualEdits.includes(dateKey)) {
+                    badge = `<span class="badge badge-manual">📝 แก้ไขเฉพาะวัน</span>`;
+                } else if (isFridayMoved) {
+                    badge = `<span class="badge badge-moved">🔄 ย้ายจากวันหยุด</span>`;
+                } else if (dayIdx >= 1 && dayIdx <= 5 && person !== "-" && person !== "วันหยุด") {
+                    badge = `<span class="badge badge-fixed">📌 เวรปกติ</span>`;
+                }
+
+                dayEl.innerHTML = `
+                    ${dateKey === todayKey ? '<div class="today-tag">TODAY</div>' : ''}
+                    <div class="flex justify-between items-start">
+                        <span class="text-sm font-bold ${dayIdx === 0 || dayIdx === 6 || holiday ? 'text-red-500' : 'text-slate-400'}">${d}</span>
+                    </div>
+                    <div class="mt-3">
+                        <div class="text-[15px] font-bold ${dayIdx === 0 || dayIdx === 6 || holiday ? 'text-red-500' : 'text-slate-700'} truncate">${person === "วันหยุด" ? "วันหยุด" : person}</div>
+                        <div class="mt-1">${badge}</div>
+                    </div>
+                `;
+                container.appendChild(dayEl);
+            }
+        }
+
+        function handleDayClick(dateKey) {
+            if (window.appState.swapMode.active) {
+                executeSwap(window.appState.swapMode.sourceDate, dateKey);
+            } else {
+                openEditModal(dateKey);
+            }
+        }
+
+        function startSwapSelection() {
+            window.appState.swapMode.active = true;
+            window.appState.swapMode.sourceDate = activeEditDate;
+            closeEditModal();
+            refreshUI();
+            const notice = document.getElementById('swap-notice');
+            notice.classList.remove('-translate-y-full');
+        }
+
+        function cancelSwapMode() {
+            window.appState.swapMode.active = false;
+            window.appState.swapMode.sourceDate = null;
+            const notice = document.getElementById('swap-notice');
+            notice.classList.add('-translate-y-full');
+            refreshUI();
+        }
+
+        async function executeSwap(d1, d2) {
+            if (d1 === d2) {
+                cancelSwapMode();
+                return;
+            }
+            const p1 = window.appState.roster[d1] || "-";
+            const p2 = window.appState.roster[d2] || "-";
+            if (p1 === "วันหยุด" || p2 === "วันหยุด") {
+                showToast("❌ ไม่สามารถสลับเวรกับวันหยุดได้");
+                cancelSwapMode();
+                return;
+            }
+            window.appState.roster[d1] = p2;
+            window.appState.roster[d2] = p1;
+            window.appState.swapHistory.unshift({
+                timestamp: Date.now(),
+                date1: d1,
+                date2: d2,
+                person1Orig: p1,
+                person2Orig: p2
+            });
+            if (new Date(d1).getDay() === 5 || new Date(d2).getDay() === 5) await syncFridayRotation();
+            await window.saveToCloud();
+            cancelSwapMode();
+            showToast("สลับเวรเรียบร้อย 🔄");
+        }
+
+        function renderSwapHistory() {
+            const list = document.getElementById('swap-history-list');
+            const noMsg = document.getElementById('no-swap-msg');
+            if (window.appState.swapHistory.length === 0) { list.innerHTML = ''; noMsg.classList.remove('hidden'); return; }
+            noMsg.classList.add('hidden');
+            list.innerHTML = window.appState.swapHistory.map((swap, idx) => `
+                <tr class="group hover:bg-slate-50 transition-colors">
+                    <td class="py-4 text-[11px] text-slate-400">${new Date(swap.timestamp).toLocaleString('th-TH')}</td>
+                    <td class="py-4">
+                        <div class="flex items-center gap-2">
+                            <span class="font-bold text-slate-700">${swap.person1Orig}</span>
+                            <span class="text-slate-300 text-xs">↔️</span>
+                            <span class="font-bold text-slate-700">${swap.person2Orig}</span>
+                        </div>
+                    </td>
+                    <td class="py-4 text-xs text-slate-500">สลับวันที่ <span class="font-bold">${swap.date1}</span> กับ <span class="font-bold">${swap.date2}</span></td>
+                    <td class="py-4 text-right admin-only">
+                        <button onclick="undoSwap(${idx})" class="text-red-400 hover:text-red-600 text-xs font-bold p-2">คืนค่า</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        async function undoSwap(idx) {
+            const swap = window.appState.swapHistory[idx];
+            showConfirm(`คืนค่าการสลับเวรวันที่ ${swap.date1} และ ${swap.date2}?`, async () => {
+                window.appState.roster[swap.date1] = swap.person1Orig;
+                window.appState.roster[swap.date2] = swap.person2Orig;
+                window.appState.swapHistory.splice(idx, 1);
+                if (new Date(swap.date1).getDay() === 5 || new Date(swap.date2).getDay() === 5) await syncFridayRotation();
+                await window.saveToCloud();
+                refreshUI();
+            });
+        }
+
+        function openEditModal(dateKey) {
+            activeEditDate = dateKey;
+            const dateObj = new Date(dateKey);
+            document.getElementById('modal-date-title').innerText = `${dateObj.getDate()} ${dateObj.toLocaleDateString('th-TH', { month: 'long', year: 'numeric' })}`;
+            const container = document.getElementById('modal-staff-options');
+            container.innerHTML = window.appState.staffNames.map(n => `
+                <button onclick="manualSet('${n}')" class="bg-white border border-slate-200 p-3 rounded-2xl text-[13px] font-bold text-slate-700 hover:border-blue-400 hover:bg-blue-50 transition">${n}</button>
+            `).join('') + `<button onclick="manualSet('วันหยุด')" class="bg-white border border-red-100 p-3 rounded-2xl text-[13px] font-bold text-red-500 hover:bg-red-50 transition col-span-2">วันหยุด</button>`;
+            const modal = document.getElementById('edit-modal');
+            modal.classList.remove('hidden');
+            setTimeout(() => { modal.classList.add('opacity-100'); modal.querySelector('div').classList.remove('scale-95'); }, 10);
+        }
+
+        function closeEditModal() {
+            const modal = document.getElementById('edit-modal');
+            modal.classList.remove('opacity-100');
+            modal.querySelector('div').classList.add('scale-95');
+            setTimeout(() => modal.classList.add('hidden'), 200);
+        }
+
+        async function manualSet(name) {
+            window.appState.roster[activeEditDate] = name;
+            if (!window.appState.manualEdits.includes(activeEditDate)) window.appState.manualEdits.push(activeEditDate);
+            window.appState.swapHistory = window.appState.swapHistory.filter(s => s.date1 !== activeEditDate && s.date2 !== activeEditDate);
+            if (new Date(activeEditDate).getDay() === 5) await syncFridayRotation();
+            await window.saveToCloud();
+            closeEditModal();
+            refreshUI();
+            showToast("อัปเดตข้อมูลแล้ว ✅");
+        }
+
+        function showConfirm(msg, action) {
+            document.getElementById('confirm-msg').innerText = msg;
+            const modal = document.getElementById('confirm-modal');
+            modal.classList.remove('hidden');
+            setTimeout(() => modal.classList.add('opacity-100'), 10);
+            document.getElementById('confirm-yes').onclick = () => { action(); closeConfirm(); };
+        }
+        function closeConfirm() { const modal = document.getElementById('confirm-modal'); modal.classList.remove('opacity-100'); setTimeout(() => modal.classList.add('hidden'), 200); }
+        function showToast(msg) {
+            const t = document.getElementById('toast');
+            document.getElementById('toast-text').innerText = msg;
+            t.classList.remove('translate-y-40');
+            setTimeout(() => t.classList.add('translate-y-40'), 4000);
+        }
+
+        function changeMonth(n) { 
+            window.appState.viewDate.setMonth(window.appState.viewDate.getMonth() + n); 
+            window.appState.holidays = window.getThaiHolidays(window.appState.viewDate.getFullYear());
+            refreshUI(); 
+        }
+
+        function jumpToMonth() {
+            const v = document.getElementById('month-picker').value;
+            if (v) {
+                const [y, m] = v.split('-');
+                window.appState.viewDate = new Date(y, m-1, 1);
+                window.appState.holidays = window.getThaiHolidays(window.appState.viewDate.getFullYear());
+                refreshUI();
+            }
+        }
+
+        window.clearAllDatabaseData = async function() {
+            if (!window.appState.user || !window.appState.isAdmin) return;
+            try {
+                window.appState.roster = {};
+                window.appState.swapHistory = [];
+                window.appState.manualEdits = [];
+                await window.saveToCloud();
+                window.refreshUI();
+                return true;
+            } catch (e) {
+                console.error("Clear Data Error", e);
+                return false;
+            }
+        };
+
+        window.onload = () => { window.initApp(); updateAuthUI(); };
+        window.toggleSidebar = toggleSidebar;
+        window.toggleAdminRole = toggleAdminRole;
+        window.updateAuthUI = updateAuthUI;
+        window.changeMonth = changeMonth;
+        window.jumpToMonth = jumpToMonth;
+        window.addStaff = addStaff;
+        window.removeStaff = removeStaff;
+        window.setFixedDuty = setFixedDuty;
+        window.autoAssignYear = autoAssignYear;
+        window.confirmResetCalendar = () => showConfirm("ยืนยันล้างข้อมูลในปฏิทินทั้งหมด? (รายชื่อและเวรประจำจะไม่ถูกลบ)", window.clearAllDatabaseData);
+        window.manualSet = manualSet;
+        window.closeEditModal = closeEditModal;
+        window.closeConfirm = closeConfirm;
+        window.refreshUI = refreshUI;
+        window.startSwapSelection = startSwapSelection;
+        window.cancelSwapMode = cancelSwapMode;
+        window.undoSwap = undoSwap;
+    </script>
+</body>
+</html>
