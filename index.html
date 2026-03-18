@@ -29,25 +29,35 @@
         };
 
         // Firebase config initialization with fallback
-        let firebaseConfig = null;
+        // Firebase Configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyDRbwlG0Umf_R9tZNMXcK1ssmAOVZwhAZk",
+            authDomain: "duty-roster-project.firebaseapp.com",
+            projectId: "duty-roster-project",
+            storageBucket: "duty-roster-project.firebasestorage.app",
+            messagingSenderId: "1001665359312",
+            appId: "1:1001665359312:web:fab0df00348394f6099dd5"
+        };
+
         let app = null;
         let db = null;
         let auth = null;
         let firebaseEnabled = false;
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'duty-roster-v3';
+        const appId = 'duty-roster-project';
+        
+        // Connection status tracking
+        window.firebaseConnected = false;
+        window.firebaseFirstConnectionNotified = false;
 
-        // Try to initialize Firebase
+        // Initialize Firebase
         try {
-            if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-                firebaseConfig = typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
-                app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                firebaseEnabled = true;
-                console.log("✅ Firebase initialized successfully");
-            } else {
-                console.warn("⚠️ Firebase config not found, using localStorage");
-            }
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            firebaseEnabled = true;
+            console.log("✅ Firebase initialized successfully");
+            console.log("📍 Project:", firebaseConfig.projectId);
+            console.log("🔥 Firebase Ready - Waiting for auth...");
         } catch (error) {
             console.error("❌ Firebase initialization error:", error);
             console.log("📦 Switching to localStorage mode");
@@ -143,12 +153,44 @@
                 return;
             }
             
-            if (!window.appState.user) return;
-            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'global');
+            if (!window.appState.user) {
+                console.log("❌ No user - cannot subscribe");
+                return;
+            }
+            
+            console.log("📡 Attempting to subscribe to Firestore...");
+            const docRef = doc(db, 'artifacts', appId, 'public', 'global');
             
             onSnapshot(docRef, (docSnap) => {
+                console.log("📥 Firestore snapshot received");
                 window.appState.isOnline = true;
                 window.updateStatusUI();
+                
+                if (!window.firebaseConnected) {
+                    window.firebaseConnected = true;
+                    console.log("✅ Firebase connected and listening!");
+                    
+                    // Try to show notification multiple ways
+                    try {
+                        if (typeof window.showToast === 'function') {
+                            window.firebaseFirstConnectionNotified = true;
+                            window.showToast("เชื่อมต่อ Firebase ได้ ☁️");
+                            console.log("📢 Toast notification shown");
+                        } else {
+                            console.warn("⚠️ showToast not ready yet, will retry...");
+                            // Retry after delay
+                            setTimeout(() => {
+                                if (typeof window.showToast === 'function' && !window.firebaseFirstConnectionNotified) {
+                                    window.firebaseFirstConnectionNotified = true;
+                                    window.showToast("เชื่อมต่อ Firebase ได้ ☁️");
+                                    console.log("📢 Toast notification shown (delayed)");
+                                }
+                            }, 500);
+                        }
+                    } catch (e) {
+                        console.error("❌ Error showing toast:", e);
+                    }
+                }
                 
                 if (docSnap.exists()) {
                     const data = docSnap.data();
@@ -160,6 +202,7 @@
                     saveToStorage();
                     console.log("☁️ Data synced from Firebase");
                 } else {
+                    console.log("📝 No Firestore document - creating with defaults");
                     window.appState.staffNames = ["โบ", "พี่นา", "พี่จอย", "พี่เปิ้ล"];
                     window.appState.fixedDuties = { 1: "โบ", 2: "พี่นา", 3: "พี่จอย", 4: "พี่เปิ้ล", 5: "__AUTO_ROSTER__" };
                     if (window.appState.isAdmin) window.saveToCloud();
@@ -168,7 +211,13 @@
             }, (error) => {
                 window.appState.isOnline = false;
                 window.updateStatusUI();
-                console.warn("⚠️ Firebase error:", error);
+                console.error("❌ Firestore error:", error.code, error.message);
+                
+                if (window.firebaseConnected) {
+                    window.firebaseConnected = false;
+                    console.log("🔴 Firebase disconnected");
+                }
+                
                 initializeFromStorage();
                 if (typeof window.refreshUI === 'function') window.refreshUI();
             });
@@ -178,10 +227,10 @@
             // Always save to localStorage
             saveToStorage();
             
-            // Also save to Firebase if enabled and user is admin
+            // Also save to Firebase if enabled and user is logged in as Admin
             if (!firebaseEnabled || !window.appState.user || !window.appState.isAdmin) return;
             
-            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'global');
+            const docRef = doc(db, 'artifacts', appId, 'public', 'global');
             try {
                 await setDoc(docRef, {
                     staffNames: window.appState.staffNames,
@@ -582,9 +631,11 @@
         function addStaff() {
             const input = document.getElementById('new-name');
             const name = input.value.trim();
+            console.log("📝 Adding staff:", name, "isAdmin:", window.appState.isAdmin, "user:", window.appState.user);
             if (name && !window.appState.staffNames.includes(name)) {
                 window.appState.staffNames.push(name);
                 input.value = '';
+                console.log("📤 Calling saveToCloud...");
                 window.saveToCloud();
                 refreshUI();
             }
@@ -924,7 +975,18 @@
             }
         };
 
-        window.onload = () => { window.initApp(); updateAuthUI(); };
+        window.onload = () => { 
+            console.log("🚀 Window onload triggered");
+            window.initApp(); 
+            updateAuthUI(); 
+        };
+        
+        // Show final status after 3 seconds
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                console.log("⏰ 3 second check - Firebase Connected:", firebaseConnected);
+            }, 3000);
+        });
         window.toggleSidebar = toggleSidebar;
         window.toggleAdminRole = toggleAdminRole;
         window.updateAuthUI = updateAuthUI;
