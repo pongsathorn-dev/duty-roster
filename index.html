@@ -850,6 +850,11 @@
             }
             window.appState.roster[d1] = p2;
             window.appState.roster[d2] = p1;
+            
+            // Mark both dates as manually edited to prevent syncFridayRotation from overwriting
+            if (!window.appState.manualEdits.includes(d1)) window.appState.manualEdits.push(d1);
+            if (!window.appState.manualEdits.includes(d2)) window.appState.manualEdits.push(d2);
+            
             window.appState.swapHistory.unshift({
                 timestamp: Date.now(),
                 date1: d1,
@@ -879,8 +884,8 @@
                         </div>
                     </td>
                     <td class="py-4 text-xs text-slate-500">สลับวันที่ <span class="font-bold">${swap.date1}</span> กับ <span class="font-bold">${swap.date2}</span></td>
-                    <td class="py-4 text-right admin-only">
-                        <button onclick="undoSwap(${idx})" class="text-red-400 hover:text-red-600 text-xs font-bold p-2">คืนค่า</button>
+                    <td class="py-4 text-right">
+                        <button onclick="undoSwap(${idx})" class="text-red-400 hover:text-red-600 text-xs font-bold p-2 rounded-lg hover:bg-red-50 transition">คืนค่า</button>
                     </td>
                 </tr>
             `).join('');
