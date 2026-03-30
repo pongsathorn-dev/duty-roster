@@ -20,12 +20,15 @@
             roster: {},
             swapHistory: [], 
             manualEdits: [], 
+            badgeEdits: {},
             holidays: {}, 
             isSidebarOpen: false, 
             user: null,
             isOnline: false,
             isAdmin: false,
-            swapMode: { active: false, sourceDate: null } // โหมดสลับเวร
+            swapMode: { active: false, sourceDate: null }, // โหมดสลับเวร
+            badgeLinkMode: { active: false, targetDate: null },
+            activeModalTab: 'duty'
         };
 
         // Firebase config initialization with fallback
@@ -117,6 +120,7 @@
                     window.appState.roster = data.roster || {};
                     window.appState.swapHistory = data.swapHistory || [];
                     window.appState.manualEdits = data.manualEdits || [];
+                    window.appState.badgeEdits = data.badgeEdits || {};
                     console.log("✅ Data loaded from localStorage");
                 } catch (e) {
                     console.error("❌ Error loading from localStorage:", e);
@@ -138,6 +142,7 @@
                     roster: window.appState.roster,
                     swapHistory: window.appState.swapHistory,
                     manualEdits: window.appState.manualEdits,
+                    badgeEdits: window.appState.badgeEdits,
                     lastUpdated: new Date().toISOString()
                 };
                 localStorage.setItem(`duty-roster-${appId}`, JSON.stringify(data));
@@ -199,6 +204,7 @@
                     window.appState.roster = data.roster || {};
                     window.appState.swapHistory = data.swapHistory || []; 
                     window.appState.manualEdits = data.manualEdits || [];
+                    window.appState.badgeEdits = data.badgeEdits || {};
                     saveToStorage();
                     console.log("☁️ Data synced from Firebase");
                 } else {
@@ -238,6 +244,7 @@
                     roster: window.appState.roster,
                     swapHistory: window.appState.swapHistory,
                     manualEdits: window.appState.manualEdits,
+                    badgeEdits: window.appState.badgeEdits,
                     lastUpdated: new Date()
                 });
                 console.log("☁️ Data saved to Firebase");
@@ -252,6 +259,7 @@
                 window.appState.roster = {};
                 window.appState.swapHistory = [];
                 window.appState.manualEdits = [];
+                window.appState.badgeEdits = {};
                 await window.saveToCloud();
                 window.refreshUI();
                 showToast("ล้างข้อมูลปฏิทินเรียบร้อย ✅");
@@ -278,6 +286,8 @@
         .badge-fixed { background: #f3e8ff; color: #7e22ce; border: 1px solid #e9d5ff; }
         .badge-manual { background: #fff7ed; color: #c2410c; border: 1px solid #ffedd5; }
         .badge-swapped { background: #ecfdf5; color: #059669; border: 1px solid #d1fae5; }
+        .badge-custom { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+        .badge-substitute { background: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe; }
         .badge-holiday { background: #fef2f2; color: #dc2626; border: 1px solid #fee2e2; }
         .badge-moved { background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; }
         .sidebar-transition { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
@@ -308,6 +318,17 @@
             </div>
         </div>
         <button onclick="cancelSwapMode()" class="mr-4 bg-white/20 hover:bg-white/30 px-4 py-2 rounded-xl text-xs font-bold transition">ยกเลิก</button>
+    </div>
+
+    <div id="badge-link-notice" class="fixed top-0 left-0 w-full bg-indigo-600 text-white p-4 shadow-xl z-[100] flex justify-between items-center transform -translate-y-full transition-transform duration-300">
+        <div class="flex items-center gap-3 ml-4">
+            <span class="text-xl">🏷️</span>
+            <div>
+                <p class="font-bold text-sm">กำลังเลือกวันที่อ้างอิงสำหรับ badge</p>
+                <p class="text-[10px] opacity-90">คลิกวันที่ในปฏิทินเพื่อสร้าง badge ว่าเป็นเวรแทนวันที่นั้น</p>
+            </div>
+        </div>
+        <button onclick="cancelBadgeLinkMode()" class="mr-4 bg-white/20 hover:bg-white/30 px-4 py-2 rounded-xl text-xs font-bold transition">ยกเลิก</button>
     </div>
 
     <div class="max-w-7xl mx-auto">
@@ -412,34 +433,72 @@
 
     <!-- Modal แก้ไขข้อมูล -->
     <div id="edit-modal" class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 hidden opacity-0 transition-opacity">
-        <div class="bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl p-8 transform scale-95 transition-transform">
+        <div class="bg-white w-full max-w-md max-h-[calc(100vh-2rem)] rounded-[2.5rem] shadow-2xl transform scale-95 transition-transform overflow-hidden flex flex-col">
+            <div class="p-6 sm:p-8 border-b border-slate-100">
             <div class="flex justify-between items-start mb-6">
                 <div>
                     <h3 id="modal-date-title" class="text-xl font-bold text-slate-800">วันที่...</h3>
-                    <p id="modal-date-subtitle" class="text-xs text-slate-400">เลือกเจ้าหน้าที่สำหรับวันที่นี้</p>
+                    <p id="modal-date-subtitle" class="text-xs text-slate-400">แก้ไขข้อมูลรายวัน</p>
                 </div>
                 <button onclick="closeEditModal()" class="p-2 hover:bg-slate-50 rounded-full">✕</button>
             </div>
-            
-            <div class="grid grid-cols-2 gap-3 mb-6">
-                <div class="col-span-2 text-[10px] font-bold text-slate-300 uppercase mb-1">เลือกเจ้าหน้าที่โดยตรง</div>
-                <div id="modal-staff-options" class="grid grid-cols-2 gap-2 col-span-2"></div>
+
+            <div class="grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1">
+                <button id="modal-tab-duty" type="button" onclick="switchEditModalTab('duty')" class="rounded-xl px-4 py-3 text-sm font-bold transition">แก้ไขเวร</button>
+                <button id="modal-tab-badge" type="button" onclick="switchEditModalTab('badge')" class="rounded-xl px-4 py-3 text-sm font-bold transition">แก้ไข badge</button>
+            </div>
+            </div>
+
+            <div class="flex-1 overflow-y-auto p-6 sm:p-8">
+            <div id="modal-panel-duty" class="space-y-6">
+            <div class="grid grid-cols-2 gap-3">
+                <div class="col-span-2 text-[10px] font-bold text-slate-300 uppercase mb-1">แก้ไขชื่อรายวัน</div>
+                <div id="modal-name-options" class="grid grid-cols-2 gap-2 col-span-2 mb-2"></div>
             </div>
 
             <div class="border-t pt-6">
-                <div class="text-[10px] font-bold text-slate-300 uppercase mb-4">การจัดการเวรขั้นสูง</div>
-                <div class="bg-emerald-50 p-6 rounded-3xl border border-emerald-100 flex flex-col items-center text-center">
-                    <p class="text-[11px] text-emerald-700 font-bold mb-1">ต้องการสลับเวรกับวันอื่น?</p>
-                    <p class="text-[9px] text-emerald-600/70 mb-4">กดปุ่มด้านล่างแล้วคลิกเลือกวันที่บนปฏิทิน</p>
-                    <button onclick="startSwapSelection()" class="w-full bg-emerald-600 text-white py-3 rounded-2xl text-xs font-bold hover:bg-emerald-700 transition shadow-md shadow-emerald-100 flex items-center justify-center gap-2">
+                <div class="text-[10px] font-bold text-slate-300 uppercase mb-4">สลับเวรกับวันอื่น</div>
+                <div class="bg-amber-50 p-6 rounded-3xl border border-amber-100 flex flex-col items-center text-center">
+                    <p class="text-[11px] text-amber-700 font-bold mb-1">ต้องการสลับเวรกับวันอื่น?</p>
+                    <p class="text-[9px] text-amber-600/70 mb-4">กดปุ่มด้านล่าง แล้วคลิกอีกวันที่บนปฏิทินเพื่อสลับเวร</p>
+                    <button onclick="startSwapSelection()" class="w-full bg-amber-500 text-white py-3 rounded-2xl text-xs font-bold hover:bg-amber-600 transition shadow-md shadow-amber-100 flex items-center justify-center gap-2">
                         <span>🔄 เริ่มการสลับเวร</span>
                     </button>
                 </div>
             </div>
+            </div>
+
+            <div id="modal-panel-badge" class="space-y-6 hidden">
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="col-span-2 text-[10px] font-bold text-slate-300 uppercase mb-1">เลือก badge ด่วน</div>
+                    <div id="modal-staff-options" class="grid grid-cols-2 gap-2 col-span-2"></div>
+                </div>
+
+                <div class="border-t border-slate-100 pt-6">
+                    <div class="text-[10px] font-bold text-slate-300 uppercase mb-3">พิมพ์ badge เอง</div>
+                    <div class="space-y-3">
+                        <input id="custom-badge-input" type="text" placeholder="เช่น เวรปกติ, รออนุมัติ, ประสานงาน" class="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm text-slate-700 outline-none transition focus:border-blue-400 focus:ring-4 focus:ring-blue-50">
+                        <div class="flex gap-2">
+                            <button onclick="saveCustomBadge()" class="flex-1 bg-blue-600 text-white py-3 rounded-2xl text-xs font-bold hover:bg-blue-700 transition shadow-md shadow-blue-100">บันทึก badge นี้</button>
+                            <button onclick="clearBadgeEdit()" class="px-4 py-3 rounded-2xl text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 transition">ล้าง badge</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="border-t pt-6">
+                    <div class="text-[10px] font-bold text-slate-300 uppercase mb-4">badge อ้างอิงวันที่อื่น</div>
+                    <div class="bg-emerald-50 p-6 rounded-3xl border border-emerald-100 flex flex-col items-center text-center">
+                        <p class="text-[11px] text-emerald-700 font-bold mb-1">ต้องการ badge แบบ "เป็นเวรแทนวันที่..." ?</p>
+                        <p id="badge-link-description" class="text-[9px] text-emerald-600/70 mb-4">กดปุ่มด้านล่าง แล้วคลิกวันที่ในปฏิทินเพื่ออ้างอิง</p>
+                        <button onclick="startBadgeLinkSelection()" class="w-full bg-emerald-600 text-white py-3 rounded-2xl text-xs font-bold hover:bg-emerald-700 transition shadow-md shadow-emerald-100 flex items-center justify-center gap-2">
+                            <span>🏷️ เลือกวันที่สำหรับ badge นี้</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            </div>
         </div>
     </div>
-
-    <!-- Modal ยืนยันการกระทำ -->
     <div id="confirm-modal" class="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-slate-900/60 hidden opacity-0 transition-opacity">
         <div class="bg-white p-8 rounded-[2rem] shadow-2xl max-w-sm w-full text-center">
             <div class="w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl">⚠️</div>
@@ -712,6 +771,65 @@
             });
         }
 
+        function escapeHtml(text) {
+            return String(text ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function formatBadgeReferenceDate(dateKey) {
+            const [year, month, day] = dateKey.split('-');
+            return `${parseInt(day, 10)}/${parseInt(month, 10)}/${year.substring(2)}`;
+        }
+
+        function getBadgeEditText(badgeEdit) {
+            if (!badgeEdit) return '';
+            if (badgeEdit.type === 'substitute' && badgeEdit.linkedDate) {
+                return `เป็นเวรแทนวันที่ ${formatBadgeReferenceDate(badgeEdit.linkedDate)}`;
+            }
+            return badgeEdit.text || '';
+        }
+
+        function getBadgePresentation(badgeEdit) {
+            if (!badgeEdit) return null;
+
+            const badgeText = escapeHtml(getBadgeEditText(badgeEdit));
+            const badgeMap = {
+                fixed: { className: 'badge-fixed', icon: '📌' },
+                manual: { className: 'badge-manual', icon: '📝' },
+                moved: { className: 'badge-moved', icon: '🔄' },
+                substitute: { className: 'badge-substitute', icon: '🏷️' },
+                custom: { className: 'badge-custom', icon: '📝' }
+            };
+
+            const config = badgeMap[badgeEdit.type] || badgeMap.custom;
+            return `<span class="badge ${config.className}">${config.icon} ${badgeText}</span>`;
+        }
+
+        function switchEditModalTab(tab) {
+            window.appState.activeModalTab = tab === 'badge' ? 'badge' : 'duty';
+            const isBadgeTab = window.appState.activeModalTab === 'badge';
+            const dutyTab = document.getElementById('modal-tab-duty');
+            const badgeTab = document.getElementById('modal-tab-badge');
+            const dutyPanel = document.getElementById('modal-panel-duty');
+            const badgePanel = document.getElementById('modal-panel-badge');
+
+            if (dutyTab) {
+                dutyTab.className = isBadgeTab
+                    ? 'rounded-xl px-4 py-3 text-sm font-bold text-slate-500 transition'
+                    : 'rounded-xl px-4 py-3 text-sm font-bold bg-white text-slate-800 shadow-sm transition';
+            }
+            if (badgeTab) {
+                badgeTab.className = isBadgeTab
+                    ? 'rounded-xl px-4 py-3 text-sm font-bold bg-white text-slate-800 shadow-sm transition'
+                    : 'rounded-xl px-4 py-3 text-sm font-bold text-slate-500 transition';
+            }
+            if (dutyPanel) dutyPanel.classList.toggle('hidden', isBadgeTab);
+            if (badgePanel) badgePanel.classList.toggle('hidden', !isBadgeTab);
+        }
         function renderCalendar() {
             const container = document.getElementById('calendar-body');
             container.innerHTML = '';
@@ -723,7 +841,7 @@
             const todayKey = formatDateKey(new Date());
 
             const calendarContainer = document.getElementById('calendar-container');
-            if (window.appState.swapMode.active) {
+            if (window.appState.swapMode.active || window.appState.badgeLinkMode.active) {
                 calendarContainer.classList.add('swap-mode-active');
             } else {
                 calendarContainer.classList.remove('swap-mode-active');
@@ -741,11 +859,15 @@
                 const dayIdx = date.getDay();
                 const holiday = holidays[dateKey];
                 const person = window.appState.roster[dateKey] || "-";
+                const badgeEdit = window.appState.badgeEdits[dateKey];
 
                 const dayEl = document.createElement('div');
                 let cardClass = `day-card p-4 ${window.appState.isAdmin ? 'cursor-pointer' : ''} ${dateKey === todayKey ? 'today-card' : ''}`;
-                
+
                 if (window.appState.swapMode.active && dateKey === window.appState.swapMode.sourceDate) {
+                    cardClass += ' swap-source-card';
+                }
+                if (window.appState.badgeLinkMode.active && dateKey === window.appState.badgeLinkMode.targetDate) {
                     cardClass += ' swap-source-card';
                 }
 
@@ -756,7 +878,7 @@
 
                 let badge = '';
                 const swapInfo = window.appState.swapHistory.find(s => s.date1 === dateKey || s.date2 === dateKey);
-                
+
                 let isFridayMoved = false;
                 if (dayIdx === 5 && !window.appState.manualEdits.includes(dateKey) && person !== "วันหยุด" && person !== "เวรว่าง") {
                     const weekStart = new Date(date);
@@ -770,12 +892,13 @@
                     }
                 }
 
-                if (holiday) {
-                    badge = `<span class="badge badge-holiday">🏝️ ${holiday}</span>`;
+                if (badgeEdit) {
+                    badge = getBadgePresentation(badgeEdit);
+                } else if (holiday) {
+                    badge = `<span class="badge badge-holiday">🏝️ ${escapeHtml(holiday)}</span>`;
                 } else if (swapInfo) {
-                    // ปรับปรุงตรรกะการแสดงผลสลับแทนเจ้าของเวรเดิม
                     let originalPersonOfThisDate, targetDateOfSwap;
-                    
+
                     if (swapInfo.date1 === dateKey) {
                         originalPersonOfThisDate = swapInfo.person1Orig;
                         targetDateOfSwap = swapInfo.date2;
@@ -784,11 +907,7 @@
                         targetDateOfSwap = swapInfo.date1;
                     }
 
-                    // จัดรูปแบบวันที่ดั้งเดิมให้สวยงาม (DD/MM/YY)
-                    const [y, m, dayPart] = targetDateOfSwap.split('-');
-                    const displayTargetDate = `${parseInt(dayPart)}/${parseInt(m)}/${y.substring(2)}`;
-                    
-                    badge = `<span class="badge badge-swapped">🔄 สลับแทน ${originalPersonOfThisDate} วันที่ ${displayTargetDate}</span>`;
+                    badge = `<span class="badge badge-swapped">🔄 สลับแทน ${escapeHtml(originalPersonOfThisDate)} วันที่ ${formatBadgeReferenceDate(targetDateOfSwap)}</span>`;
                 } else if (window.appState.manualEdits.includes(dateKey)) {
                     badge = `<span class="badge badge-manual">📝 แก้ไขเฉพาะวัน</span>`;
                 } else if (isFridayMoved) {
@@ -799,19 +918,22 @@
 
                 dayEl.innerHTML = `
                     ${dateKey === todayKey ? '<div class="today-tag">TODAY</div>' : ''}
-                    <div class="flex justify-between items-start">
+                    <div class="flex justify-between items-start gap-2">
                         <span class="text-sm font-bold ${dayIdx === 0 || dayIdx === 6 || holiday ? 'text-red-500' : 'text-slate-400'}">${d}</span>
                     </div>
                     <div class="mt-3">
-                        <div class="text-[15px] font-bold ${dayIdx === 0 || dayIdx === 6 || holiday ? 'text-red-500' : 'text-slate-700'} truncate">${person === "วันหยุด" ? "วันหยุด" : person}</div>
+                        <div class="text-[15px] font-bold ${dayIdx === 0 || dayIdx === 6 || holiday ? 'text-red-500' : 'text-slate-700'} truncate">${person === "วันหยุด" ? "วันหยุด" : escapeHtml(person)}</div>
                         <div class="mt-1">${badge}</div>
                     </div>
                 `;
                 container.appendChild(dayEl);
             }
         }
-
         function handleDayClick(dateKey) {
+            if (window.appState.badgeLinkMode.active) {
+                applyBadgeLinkSelection(window.appState.badgeLinkMode.targetDate, dateKey);
+                return;
+            }
             if (window.appState.swapMode.active) {
                 executeSwap(window.appState.swapMode.sourceDate, dateKey);
             } else {
@@ -819,6 +941,43 @@
             }
         }
 
+        function startBadgeLinkSelection() {
+            if (!activeEditDate) return;
+            window.appState.badgeLinkMode.active = true;
+            window.appState.badgeLinkMode.targetDate = activeEditDate;
+            closeEditModal();
+            refreshUI();
+            const notice = document.getElementById('badge-link-notice');
+            if (notice) notice.classList.remove('-translate-y-full');
+        }
+
+        function cancelBadgeLinkMode() {
+            window.appState.badgeLinkMode.active = false;
+            window.appState.badgeLinkMode.targetDate = null;
+            const notice = document.getElementById('badge-link-notice');
+            if (notice) notice.classList.add('-translate-y-full');
+            refreshUI();
+        }
+
+        async function applyBadgeLinkSelection(targetDate, linkedDate) {
+            if (!targetDate) {
+                cancelBadgeLinkMode();
+                return;
+            }
+            if (targetDate === linkedDate) {
+                showToast('กรุณาเลือกวันที่อื่นสำหรับ badge นี้');
+                return;
+            }
+            window.appState.badgeEdits[targetDate] = {
+                type: 'substitute',
+                linkedDate,
+                updatedAt: Date.now()
+            };
+            await window.saveToCloud();
+            cancelBadgeLinkMode();
+            refreshUI();
+            showToast('อัปเดต badge เป็นเวรแทนวันที่แล้ว');
+        }
         function startSwapSelection() {
             window.appState.swapMode.active = true;
             window.appState.swapMode.sourceDate = activeEditDate;
@@ -906,16 +1065,70 @@
         function openEditModal(dateKey) {
             activeEditDate = dateKey;
             const dateObj = new Date(dateKey);
+            const existingBadge = window.appState.badgeEdits[dateKey];
+            const currentBadgeText = existingBadge ? getBadgeEditText(existingBadge) : '';
+            const currentPerson = window.appState.roster[dateKey] || '-';
+
             document.getElementById('modal-date-title').innerText = `${dateObj.getDate()} ${dateObj.toLocaleDateString('th-TH', { month: 'long', year: 'numeric' })}`;
+            document.getElementById('modal-date-subtitle').innerText = `เวรวันนี้: ${currentPerson}${currentBadgeText ? ` | badge: ${currentBadgeText}` : ''}`;
+
+            const badgeLinkDescription = document.getElementById('badge-link-description');
+            if (badgeLinkDescription) {
+                badgeLinkDescription.innerText = existingBadge?.type === 'substitute' && existingBadge.linkedDate
+                    ? `ตอนนี้ตั้งไว้เป็นเวรแทนวันที่ ${formatBadgeReferenceDate(existingBadge.linkedDate)}`
+                    : 'กดปุ่มด้านล่าง แล้วคลิกวันที่ในปฏิทินเพื่ออ้างอิง';
+            }
+
+            const nameContainer = document.getElementById('modal-name-options');
+            nameContainer.innerHTML = '';
+            const quickNames = [...window.appState.staffNames, 'วันหยุด'];
+            quickNames.forEach((name) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = `p-3 rounded-2xl text-[13px] font-bold transition ${name === 'วันหยุด'
+                    ? 'bg-white border border-red-100 text-red-500 hover:bg-red-50 col-span-2'
+                    : 'bg-white border border-slate-200 text-slate-700 hover:border-blue-400 hover:bg-blue-50'}`;
+                button.textContent = name;
+                if (name === currentPerson) {
+                    button.classList.add('ring-2', 'ring-blue-200', 'border-blue-300', 'bg-blue-50');
+                }
+                button.onclick = () => manualSet(name);
+                nameContainer.appendChild(button);
+            });
+
             const container = document.getElementById('modal-staff-options');
-            container.innerHTML = window.appState.staffNames.map(n => `
-                <button onclick="manualSet('${n}')" class="bg-white border border-slate-200 p-3 rounded-2xl text-[13px] font-bold text-slate-700 hover:border-blue-400 hover:bg-blue-50 transition">${n}</button>
-            `).join('') + `<button onclick="manualSet('วันหยุด')" class="bg-white border border-red-100 p-3 rounded-2xl text-[13px] font-bold text-red-500 hover:bg-red-50 transition col-span-2">วันหยุด</button>`;
+            container.innerHTML = '';
+            const quickBadges = [
+                { label: 'เวรปกติ', type: 'fixed' },
+                { label: 'แก้ไขเฉพาะวัน', type: 'manual' },
+                { label: 'ย้ายจากวันหยุด', type: 'moved' },
+                { label: 'ตรวจสอบอีกครั้ง', type: 'custom' }
+            ];
+            quickBadges.forEach(({ label, type }) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'bg-white border border-slate-200 p-3 rounded-2xl text-[13px] font-bold text-slate-700 hover:border-blue-400 hover:bg-blue-50 transition';
+                button.textContent = label;
+                button.onclick = () => setQuickBadge(label, type);
+                container.appendChild(button);
+            });
+
+            const customInput = document.getElementById('custom-badge-input');
+            if (customInput) {
+                customInput.value = existingBadge?.type === 'custom' ? (existingBadge.text || '') : '';
+            }
+
+            const preferredTab = 'duty';
+            switchEditModalTab(preferredTab);
+
             const modal = document.getElementById('edit-modal');
             modal.classList.remove('hidden');
-            setTimeout(() => { modal.classList.add('opacity-100'); modal.querySelector('div').classList.remove('scale-95'); }, 10);
+            setTimeout(() => {
+                modal.classList.add('opacity-100');
+                modal.querySelector('div').classList.remove('scale-95');
+                if (customInput && preferredTab === 'badge') customInput.focus();
+            }, 10);
         }
-
         function closeEditModal() {
             const modal = document.getElementById('edit-modal');
             modal.classList.remove('opacity-100');
@@ -934,6 +1147,39 @@
             showToast("อัปเดตข้อมูลแล้ว ✅");
         }
 
+        async function setQuickBadge(label, type = 'custom') {
+            if (!activeEditDate) return;
+            window.appState.badgeEdits[activeEditDate] = {
+                type,
+                text: label,
+                updatedAt: Date.now()
+            };
+            await window.saveToCloud();
+            closeEditModal();
+            refreshUI();
+            showToast('อัปเดต badge แล้ว');
+        }
+
+        async function saveCustomBadge() {
+            const input = document.getElementById('custom-badge-input');
+            if (!input) return;
+            const value = input.value.trim();
+            if (!value) {
+                input.focus();
+                showToast('กรุณาพิมพ์ข้อความ badge ก่อนบันทึก');
+                return;
+            }
+            await setQuickBadge(value);
+        }
+
+        async function clearBadgeEdit() {
+            if (!activeEditDate) return;
+            delete window.appState.badgeEdits[activeEditDate];
+            await window.saveToCloud();
+            closeEditModal();
+            refreshUI();
+            showToast('ล้าง badge รายวันแล้ว');
+        }
         function showConfirm(msg, action) {
             document.getElementById('confirm-msg').innerText = msg;
             const modal = document.getElementById('confirm-modal');
@@ -971,6 +1217,7 @@
                 window.appState.roster = {};
                 window.appState.swapHistory = [];
                 window.appState.manualEdits = [];
+                window.appState.badgeEdits = {};
                 await window.saveToCloud();
                 window.refreshUI();
                 return true;
@@ -1003,12 +1250,28 @@
         window.autoAssignYear = autoAssignYear;
         window.confirmResetCalendar = () => showConfirm("ยืนยันล้างข้อมูลในปฏิทินทั้งหมด? (รายชื่อและเวรประจำจะไม่ถูกลบ)", window.clearAllDatabaseData);
         window.manualSet = manualSet;
+        window.startBadgeLinkSelection = startBadgeLinkSelection;
+        window.cancelBadgeLinkMode = cancelBadgeLinkMode;
+        window.saveCustomBadge = saveCustomBadge;
+        window.clearBadgeEdit = clearBadgeEdit;
+        window.setQuickBadge = setQuickBadge;
+        window.switchEditModalTab = switchEditModalTab;
         window.closeEditModal = closeEditModal;
         window.closeConfirm = closeConfirm;
         window.refreshUI = refreshUI;
         window.startSwapSelection = startSwapSelection;
         window.cancelSwapMode = cancelSwapMode;
         window.undoSwap = undoSwap;
+
+        document.addEventListener('keydown', (event) => {
+            const modal = document.getElementById('edit-modal');
+            const input = document.getElementById('custom-badge-input');
+            if (!modal || modal.classList.contains('hidden') || !input) return;
+            if (event.key === 'Enter' && document.activeElement === input) {
+                event.preventDefault();
+                saveCustomBadge();
+            }
+        });
     </script>
 </body>
 </html>
